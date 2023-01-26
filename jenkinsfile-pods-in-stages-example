@@ -1,0 +1,151 @@
+
+def d = [
+  'terraform.version':'1.0.0',
+  'tfsec.version':'v0.57.1',
+  'tflint.version':'v0.32.0'
+]
+
+def props = [:]
+
+podTemplate {
+  node(POD_LABEL) {
+    checkout scm
+    props = readProperties(defaults: d, file: 'version.properties')
+  }
+}
+@Library("shared-library") _
+
+    def podYaml = libraryResource "podTemplates/template.yaml"
+
+    def deploy_region = ""
+
+    pipeline {
+        options {
+            timestamps()
+            timeout(time: 90, unit: 'MINUTES')
+        }
+        environment {
+            INIT_ENV_VARS = "${initEnvVars.call(pipeParams, this)}"
+        }
+        agent none
+        parameters {
+            string(name: 'DEPLOY_GIT_COMMIT', defaultValue: '', description: 'Which Git commit or ImageTag do you want to deploy? (Default is passed from CI)')
+            choice(name: 'DEPLOY_TARGET', choices: ['Dev', 'QA', 'Stage', 'Prod'], description: 'Which Target to deploy to first? (All Approvals still required)')
+        }
+        stages {
+            stage('Init') {
+                agent {
+                    kubernetes {
+                        yaml podYaml
+                    }
+                }
+                steps {
+                    container('base-agent') {
+                        sh "ls"
+                        sh "env"
+                        echo "build something"
+                        stash name: "ECS_DEPLOY_STASH"
+                    }
+                }
+                post {
+                    failure {
+                        container('base-agent') {
+                            script {
+                                logger.info("Error Pulling Source Code")
+                            }
+                        }
+                    }
+                }
+            }
+            stage('Devops Artifact Verification') {
+                agent {
+                    kubernetes {
+                        yaml podYaml
+                    }
+                }
+                steps {
+                    container('base-agent') {
+                        unstash "ECS_DEPLOY_STASH"
+                        script {
+                            logger.stage()
+                            logger.info("Devops Artifact Validation Initiated")
+                            init.cdVerifyArtifacts(properties.cd)
+                        }
+                    }
+                }
+                post {
+                    success {
+                        container('base-agent') {
+                            script {
+                                // jira.postComment("build", "passed") // Need pipeParms for cred
+                                logger.info("Artifact Verified for Deployment")
+                            }
+                        }
+                    }
+                    failure {
+                        container('base-agent') {
+                            script {
+                                // jira.postComment("build", "passed") // Need pipeParms for cred
+                                logger.info("Artifact Verification Failed")
+                            }
+                        }
+                    }
+                }
+            }
+            stage('Manifest Dev Deployment') {
+                agent {
+                    kubernetes {
+                        yaml podYaml
+                    }
+                }
+                when {
+                    beforeAgent true
+                    allOf{
+                        expression { return branchFlow(properties.branchFlow)}
+                        not { expression { return env.DEPLOY_TARGET_DEV ==~ /(?i)(false|FALSE)/ } }
+                    }
+                }
+                steps {
+                    container('base-agent') {
+                        unstash "ECS_DEPLOY_STASH"
+                        script {
+                            logger.stage()
+                            logger.info("Dev Deploy Initiated")
+                            ecsManifest.deploy(properties.cd, "dev")
+                        }
+                    }
+                }
+                post {
+                    success {
+                        container('jf') {
+                            script {
+                                logger.info("Dev Deploy Completed")
+                                deploy_region = "dev"
+                                artifactory.updateDeployRegionProperty(properties.cd, deploy_region)
+                            }
+                        }
+                        container('base-agent') {
+                            script {
+                                logger.info("Dev Deploy Completed")
+                                env.environment = "Dev"
+                                jira.postComment("deployment", "completed")
+                                env.deployStatus = "success"
+                                // Send email with Job_URL for approval for QA
+                                notification.sendEmail("Pipeline is Waiting for your Approval to proceed for QA Deployment","${BUILD_URL}input")
+                            }
+                        }
+                    }
+                    failure {
+                        container('base-agent') {
+                            script {
+                                logger.info("Dev Deploy Failed")
+                                env.environment = "Dev"
+                                jira.postComment("deployment", "failed")
+                                env.deployStatus = "failed"
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
