@@ -1,0 +1,92 @@
+pipeline {
+    agent {
+     kubernetes {
+      yaml '''
+        apiVersion: v1
+        kind: Pod
+        metadata:
+          labels:
+            some-label: some-label-value
+          annotations:
+            kubectl.kubernetes.io/default-container: "jdk8"
+        spec:
+          imagePullSecrets:
+          - name: regcred    
+          containers:
+          - name: "maven"
+            image: maven:alpine
+            command:
+            - sleep
+            args:
+            - 99d        
+        '''
+      retries 2
+     }
+    }    
+	options {
+	  skipStagesAfterUnstable()
+	}
+	stages {
+      stage('Clean Workspace') {
+        steps {
+          // Clean the workspace
+          sh 'echo "clean workspace"'
+          sh 'env'
+          //sh 'echo "Container Name in Clean: ${POD_CONTAINER}"'
+          
+          cleanWs()
+        }
+      }	   
+      
+	  stage ('Clone') {
+	    steps {
+          sh 'env'
+          //sh 'hostname'
+          /*
+          script {
+            printenv
+          }
+          sh 'printenv'
+		  //git branch: "master", credentialsId: 'jenkins2', url: 'https://bitbucket.corp.chartercom.com/scm/cicds/sample.git'
+		}
+	  }
+      
+	  stage ('Check Java') {
+        steps {
+          container("maven") {
+            sh 'java -version'
+            script{
+            java -version
+            }
+          }              
+        }
+      }
+	  stage ('Check JNLP') {
+        steps {
+          container("jnlp") {            	        
+            sh 'java -version'
+          }              
+        }
+      }
+      
+      stage ('Maven build') {
+	    steps {
+          //container("jdk8") {            
+			sh 'env'
+            sh 'java -version
+            }
+          //}
+		}
+	  }
+      
+    stage('Deploy to Artifactory') {
+      steps {
+        script {   
+          //echo "Container Name in Deploy: $POD_CONTAINER"
+          hostname
+        }
+      }  
+    }
+
+    } // End Stages     
+} // End Pipeline

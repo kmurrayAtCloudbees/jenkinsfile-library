@@ -1,0 +1,110 @@
+
+pipeline {
+    environment{
+        chost="${HOSTNAME}"
+    }
+    agent {
+         kubernetes {
+         defaultContainer 'maven'
+          yaml '''
+            apiVersion: v1
+            kind: Pod
+            metadata:
+              labels:
+                some-label: some-label-value
+              annotations:
+                kubectl.kubernetes.io/default-container: "jdk8"
+            spec:
+              imagePullSecrets:
+              - name: regcred
+              containers:
+              - name: "maven"
+                image: maven:alpine
+                command:
+                - sleep
+                args:
+                - 99d
+            '''
+        }
+    }
+	options {
+	  skipStagesAfterUnstable()
+	}
+	stages {
+          stage('Clean Workspace') {
+                steps {
+                  // Clean the workspace
+                  sh 'echo "clean workspace"'
+        //          sh 'printenv'
+                  sh 'java -version'
+                    script{
+                    "java -version"
+                    "ls -la"
+                    "cd ."
+                    "ls -la"
+                    }
+                }
+            }
+	  stage ('Clone') {
+    	    steps {
+         //     sh 'printenv'
+              sh 'java -version'
+                    script{
+                    "java -version"
+                    "ls -la"
+                    "cd ."
+                    "ls -la"
+                    }
+    		}
+	  }
+
+	  stage ('Check Java') {
+            steps {
+              container("maven") {
+                sh 'java -version'
+                    script{
+                    "java -version"
+                    "ls -la"
+                    "cd ."
+                    "ls -la"
+                    }
+              }
+            }
+        }
+	  stage ('Check JNLP') {
+            steps {
+              container("jnlp") {
+            //    sh 'printenv'
+                sh 'java -version'
+                    script{
+                    "java -version"
+                    "ls -la"
+                    "cd ."
+                    "ls -la"
+                    }
+              }
+            }
+        }
+
+      stage ('Maven build') {
+    	    steps {
+    		//	sh 'printenv'
+                sh 'java -version'
+                    script{
+                    "java -version"
+                    "ls -la"
+                    "cd ."
+                    "ls -la"
+                    }
+    		}
+	    }
+        stage('Deploy to Artifactory') {
+              steps {
+                script {
+                  //echo "Container Name in Deploy: $POD_CONTAINER"
+                  hostname
+                }
+              }
+        }
+    } // End Stages
+} // End Pipeline
