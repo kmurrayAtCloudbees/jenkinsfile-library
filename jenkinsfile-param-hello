@@ -1,0 +1,38 @@
+pipeline {
+    agent {
+        kubernetes {
+            yaml """
+apiVersion: v1
+kind: Pod
+spec:
+  containers:
+  - name: shell
+    image: ubuntu
+    command:
+    - sleep
+    args:
+    - infinity
+    securityContext:
+      runAsUser: 1000
+"""
+        }
+    }
+    
+    parameters {
+        choice(
+            name: 'GREETING',
+            choices: ['HI', 'HELLO', 'GOODBYE', 'FOO', 'BAR'],
+            description: 'Select your greeting'
+        )
+    }
+    
+    stages {
+        stage('Say Hello') {
+            steps {
+                container('shell') {
+                    echo "You selected: ${params.GREETING}"
+                }
+            }
+        }
+    }
+}
