@@ -1,0 +1,951 @@
+pipeline {
+    agent {
+        kubernetes {
+            yaml """
+apiVersion: v1
+kind: Pod
+spec:
+  containers:
+  - name: shell
+    image: ubuntu
+    command:
+    - sleep
+    args:
+    - infinity
+    securityContext:
+      runAsUser: 1000
+"""
+        }
+    }
+    
+    options {
+        timeout(time: 1, unit: 'HOURS')
+    }
+
+    parameters {
+        string(name: 'PLUGIN_REPO', defaultValue: 'https://github.com/jenkinsci/bitbucket-branch-source-plugin.git', description: 'Plugin repository URL')
+        string(name: 'BRANCH', defaultValue: 'master', description: 'Branch to analyze')
+    }
+    
+    environment {
+        ANALYSIS_DIR = 'analysis-results'
+    }
+    
+    stages {
+        stage('Prepare Environment') {
+            steps {
+                script {
+                    sh "mkdir -p ${ANALYSIS_DIR}"
+                    writeFile file: "${ANALYSIS_DIR}/analysis.log", text: "Analysis started at ${new Date()}\n"
+                }
+            }
+        }
+
+        stage('Clone Repository') {
+            steps {
+                script {
+                    cleanWs()
+                    git branch: params.BRANCH, url: params.PLUGIN_REPO
+                    logAnalysis("Successfully cloned repository: ${params.PLUGIN_REPO}")
+                }
+            }
+        }
+        
+        stage('Extract Version Info') {
+            steps {
+                script {
+                    def pom = readMavenPom file: 'pom.xml'
+                    def versionInfo = [
+                        version: pom.version,
+                        jenkinsVersion: pom.properties['jenkins.version'],
+                        javaLevel: pom.properties['java.level']
+                    ]
+                    writeJSON file: "${ANALYSIS_DIR}/version-info.json", json: versionInfo
+                    echo "Version Information:"
+                    echo "- Plugin Version: ${versionInfo.version}"
+                    echo "- Jenkins Version: ${versionInfo.jenkinsVersion}"
+                    echo "- Java Level: ${versionInfo.javaLevel}"
+                    
+                    if (fileExists('CHANGELOG.md')) {
+                        def changelog = readFile('CHANGELOG.md')
+                        writeFile file: "${ANALYSIS_DIR}/changelog-analysis.md", text: analyzeChangelog(changelog)
+                    }
+                }
+            }
+        }
+
+        stage('Analyze Dependencies') {
+            steps {
+                script {
+                    def deps = analyzeDependencies()
+                    writeJSON file: "${ANALYSIS_DIR}/dependencies.json", json: deps
+                    writeFile file: "${ANALYSIS_DIR}/dependencies.md", text: formatDependencies(deps)
+                    echo "Dependencies analyzed and saved to ${ANALYSIS_DIR}/dependencies.md"
+                }
+            }
+        }
+
+        stage('Analyze Documentation') {
+            steps {
+                script {
+                    def docAnalysis = analyzeAllDocumentation()
+                    writeFile file: "${ANALYSIS_DIR}/documentation-analysis.md", text: docAnalysis
+                    echo "Documentation analysis complete and saved to ${ANALYSIS_DIR}/documentation-analysis.md"
+                }
+            }
+        }
+
+        stage('Analyze BitBucket Configuration') {
+            steps {
+                script {
+                    analyzeBitbucketConfiguration()
+                    echo "BitBucket configuration analysis complete and saved to ${ANALYSIS_DIR}/bitbucket-config-options.md"
+                }
+            }
+        }
+
+        stage('Generate Final Report') {
+            steps {
+                script {
+                    generateFinalReport()
+                    echo "Final report generated and saved to ${ANALYSIS_DIR}/final-report.md"
+                }
+            }
+        }
+    }
+
+    post {
+        always {
+            archiveArtifacts artifacts: "${env.ANALYSIS_DIR}/**/*", allowEmptyArchive: true
+            echo """
+            Analysis complete! Artifacts available at:
+            - ${ANALYSIS_DIR}/final-report.md (Complete report)
+            - ${ANALYSIS_DIR}/version-info.json (Version details)
+            - ${ANALYSIS_DIR}/dependencies.json (Raw dependency data)
+            - ${ANALYSIS_DIR}/dependencies.md (Formatted dependency report)
+            - ${ANALYSIS_DIR}/documentation-analysis.md (Documentation analysis)
+            - ${ANALYSIS_DIR}/bitbucket-config-options.md (BitBucket configuration guide)
+            
+            Check the 'Artifacts' link in the build page sidebar to access these files.
+            """
+        }
+    }
+}
+
+// Basic Analysis Methods
+def logAnalysis(String message) {
+    def timestamp = new Date().format("yyyy-MM-dd HH:mm:ss")
+    writeFile file: "${ANALYSIS_DIR}/analysis.log", text: "${timestamp}: ${message}\n", append: true
+}
+
+def analyzeChangelog(String changelog) {
+    def analysis = new StringBuilder()
+    analysis.append("# Changelog Analysis\n\n")
+    
+    try {
+        def versionBlocks = changelog.split(/##\s+\[?[0-9]+\.[0-9]+/)
+        versionBlocks.each { block ->
+            if (block.trim()) {
+                def version = (block =~ /\[?([0-9]+\.[0-9]+[^\]]*)/)[0][1]
+                analysis.append("## Version $version\n\n")
+                
+                def features = []
+                def bugfixes = []
+                def security = []
+                
+                block.eachLine { line ->
+                    if (line.toLowerCase().contains('security')) security << line.trim()
+                    else if (line.toLowerCase().contains('fix')) bugfixes << line.trim()
+                    else if (line.trim().startsWith('*') || line.trim().startsWith('-')) features << line.trim()
+                }
+                
+                appendChangelogSection(analysis, "Security Updates", security)
+                appendChangelogSection(analysis, "New Features", features)
+                appendChangelogSection(analysis, "Bug Fixes", bugfixes)
+            }
+        }
+    } catch (Exception e) {
+        analysis.append("Error analyzing changelog: ${e.message}\n")
+    }
+    
+    return analysis.toString()
+}
+
+def appendChangelogSection(StringBuilder analysis, String title, List<String> items) {
+    if (items) {
+        analysis.append("### $title\n")
+        items.each { analysis.append("* $it\n") }
+        analysis.append("\n")
+    }
+}
+
+def analyzeDependencies() {
+    def pom = readMavenPom file: 'pom.xml'
+    def deps = [
+        compile: [:],
+        test: [:],
+        provided: [:],
+        plugins: [:]
+    ]
+    
+    pom.dependencies.each { dep ->
+        def scope = dep.scope ?: 'compile'
+        deps[scope][dep.artifactId] = [
+            groupId: dep.groupId,
+            version: dep.version,
+            optional: dep.optional ?: false
+        ]
+    }
+    
+    if (pom.build?.plugins) {
+        pom.build.plugins.each { plugin ->
+            deps.plugins[plugin.artifactId] = [
+                groupId: plugin.groupId,
+                version: plugin.version
+            ]
+        }
+    }
+    
+    return deps
+}
+
+def formatDependencies(deps) {
+    def text = new StringBuilder()
+    
+    deps.each { scope, dependencies ->
+        text.append("### ${scope.capitalize()} Dependencies\n\n")
+        dependencies.each { artifactId, details ->
+            text.append("* ${artifactId}\n")
+            text.append("  - Group: ${details.groupId}\n")
+            text.append("  - Version: ${details.version}\n")
+            if (details.optional) {
+                text.append("  - Optional: ${details.optional}\n")
+            }
+        }
+        text.append("\n")
+    }
+    
+    return text.toString()
+}
+// Documentation Analysis Methods
+def analyzeAllDocumentation() {
+    def analysis = new StringBuilder()
+    analysis.append("# Documentation Analysis\n\n")
+    
+    try {
+        if (fileExists('README.md')) {
+            analysis.append("## README Analysis\n\n")
+            analysis.append(analyzeMarkdownFile('README.md'))
+            analysis.append("\n")
+        }
+        
+        findFiles(glob: '**/src/main/resources/**/*.html').each { file ->
+            analysis.append("## Help File: ${file.path}\n\n")
+            analysis.append(analyzeHelpFile(file.path))
+            analysis.append("\n")
+        }
+        
+        findFiles(glob: '**/src/main/resources/**/*.jelly').each { file ->
+            analysis.append("## Jelly File: ${file.path}\n\n")
+            analysis.append(analyzeJellyFile(file.path))
+            analysis.append("\n")
+        }
+    } catch (Exception e) {
+        analysis.append("Error in documentation analysis: ${e.message}\n")
+    }
+    
+    return analysis.toString()
+}
+
+def analyzeMarkdownFile(String path) {
+    def content = readFile(path)
+    def analysis = new StringBuilder()
+    
+    def headers = content.findAll(/#{1,6}\s+(.+)/)
+    analysis.append("### Headers Structure\n")
+    headers.each { header ->
+        analysis.append("* ${header.trim()}\n")
+    }
+    
+    def codeBlocks = content.findAll(/```[a-z]*\n[\s\S]*?\n```/)
+    if (codeBlocks) {
+        analysis.append("\n### Code Examples\n")
+        analysis.append("Found ${codeBlocks.size()} code blocks\n")
+    }
+    
+    return analysis.toString()
+}
+
+def analyzeHelpFile(String path) {
+    def content = readFile(path)
+    def analysis = new StringBuilder()
+    
+    try {
+        def titleMatcher = content =~ /<title>(.+?)<\/title>/
+        if (titleMatcher.find()) {
+            analysis.append("### Title: ${titleMatcher.group(1)}\n")
+        } else {
+            analysis.append("### Title: Not found\n")
+        }
+        
+        def formElements = content.findAll(/<input|<select|<textarea/)
+        analysis.append("### Form Elements: ${formElements.size()}\n")
+    } catch (Exception e) {
+        analysis.append("Error analyzing help file ${path}: ${e.message}\n")
+    }
+    
+    return analysis.toString()
+}
+
+def analyzeJellyFile(String path) {
+    def content = readFile(path)
+    def analysis = new StringBuilder()
+    
+    def properties = content.findAll(/\$\{.+?\}/)
+    if (properties) {
+        analysis.append("### Properties Used\n")
+        properties.unique().each { prop ->
+            analysis.append("* ${prop}\n")
+        }
+    }
+    
+    return analysis.toString()
+}
+
+// Configuration Maps
+
+def analyzeBitbucketConfiguration() {
+    def traitConfigs = [
+    'Branch Discovery': [
+        plugin: 'Basic trait included in bitbucket-branch-source-plugin',
+        config: [
+            'strategyId': [
+                description: 'Branch discovery strategy',
+                values: [
+                    1: 'Exclude branches that are also filed as PRs',
+                    2: 'Only branches that are also filed as PRs',
+                    3: 'All branches'
+                ],
+                required: true
+            ]
+        ]
+    ],
+    'Pull Request Discovery': [
+        plugin: 'Basic trait included in bitbucket-branch-source-plugin',
+        config: [
+            'strategyId': [
+                description: 'Pull request discovery strategy',
+                values: [
+                    1: 'Merging the pull request with the current target branch revision',
+                    2: 'The current pull request revision',
+                    3: 'Both the current pull request revision and the pull request merged with the target branch'
+                ],
+                required: true
+            ]
+        ]
+    ],
+    'Filter by name (with wildcards)': [
+        plugin: 'branch-api plugin',
+        config: [
+            'includes': [
+                description: 'Space-separated list of name patterns to include',
+                example: 'main develop feature/* release/*',
+                required: false
+            ],
+            'excludes': [
+                description: 'Space-separated list of name patterns to exclude',
+                example: 'feature/old/* experimental/*',
+                required: false
+            ]
+        ]
+    ],
+    'WebHook Registration': [
+        plugin: 'bitbucket-branch-source-plugin',
+        config: [
+            'mode': [
+                description: 'Webhook registration mode',
+                values: [
+                    'ITEM': 'Register per-item hooks',
+                    'DISABLE': 'Disable hook management'
+                ],
+                required: false
+            ]
+        ]
+    ],
+    'SSH Checkout': [
+        plugin: 'git plugin',
+        config: [
+            'credentialsId': [
+                description: 'SSH credentials for git checkout',
+                required: false
+            ]
+        ]
+    ],
+    'Repository Tags Discovery': [
+        plugin: 'git plugin',
+        config: [
+            'tagStrategy': [
+                description: 'Tag discovery strategy',
+                values: [
+                    'ALL': 'Discover all tags',
+                    'RECENT': 'Only recent tags',
+                    'NONE': 'No tags'
+                ],
+                required: false,
+                default: 'NONE'
+            ]
+        ]
+    ],
+    'Git LFS Pull': [
+        plugin: 'git-lfs-plugin',
+        config: [
+            'enabled': [
+                description: 'Enable Git LFS pull after checkout',
+                required: false,
+                default: false
+            ]
+        ]
+    ],
+    'Checkout over SSH': [
+        plugin: 'git plugin',
+        config: [
+            'credentialsId': [
+                description: 'SSH key for checkout',
+                required: false
+            ]
+        ]
+    ],
+    'Pipeline Jenkinsfile': [
+        plugin: 'workflow-multibranch plugin',
+        config: [
+            'scriptPath': [
+                description: 'Path to Jenkinsfile',
+                required: false,
+                default: 'Jenkinsfile'
+            ]
+        ]
+    ],
+    'Submodule Options': [
+        plugin: 'git plugin',
+        config: [
+            'recursive': [
+                description: 'Recursively update submodules',
+                required: false,
+                default: false
+            ],
+            'shallow': [
+                description: 'Shallow clone submodules',
+                required: false,
+                default: false
+            ],
+            'timeout': [
+                description: 'Timeout (in minutes) for submodule operations',
+                required: false,
+                default: 10
+            ]
+        ]
+    ],
+    'Build Strategy': [
+        plugin: 'basic-branch-build-strategies plugin',
+        config: [
+            'strategies': [
+                description: 'Build strategies',
+                values: [
+                    'buildAll': 'Build all branches',
+                    'buildChanged': 'Build changed branches',
+                    'skipInitialBuild': 'Skip initial build on first branch indexing',
+                    'tagBuild': 'Build tags',
+                    'branchBuildStrategy': 'Custom branch build strategy'
+                ],
+                required: false
+            ]
+        ]
+    ],
+    'Checkout Status': [
+        plugin: 'bitbucket-plugin',
+        config: [
+            'updateStatus': [
+                description: 'Update commit status in BitBucket',
+                required: false,
+                default: true
+            ]
+        ]
+    ],
+    'Author Registration': [
+        plugin: 'bitbucket-plugin',
+        config: [
+            'authorMode': [
+                description: 'Author registration mode',
+                values: [
+                    'ANONYMOUS': 'Anonymous',
+                    'EVERYONE': 'Everyone',
+                    'MEMBER_OF_ORGANIZATION': 'Organization members only'
+                ],
+                required: false,
+                default: 'EVERYONE'
+            ]
+        ]
+    ],
+    'Trigger Settings': [
+        plugin: 'basic-branch-build-strategies plugin',
+        config: [
+            'triggerOnPush': [
+                description: 'Trigger build on push',
+                required: false,
+                default: true
+            ],
+            'triggerOnPR': [
+                description: 'Trigger build on PR',
+                required: false,
+                default: true
+            ],
+            'triggerOnUpdate': [
+                description: 'Trigger build on source update',
+                required: false,
+                default: true
+            ]
+        ]
+    ],
+    'Clone Options': [
+        plugin: 'git plugin',
+        config: [
+            'honorRefspec': [
+                description: 'Honor refspec on initial clone',
+                required: false,
+                default: false
+            ],
+            'shallow': [
+                description: 'Perform shallow clone',
+                required: false,
+                default: false
+            ],
+            'depth': [
+                description: 'Shallow clone depth',
+                required: false,
+                default: 1
+            ],
+            'noTags': [
+                description: 'Don\'t fetch tags',
+                required: false,
+                default: false
+            ]
+        ]
+    ],
+    'SCM Trigger': [
+        plugin: 'bitbucket-plugin',
+        config: [
+            'interval': [
+                description: 'Polling interval in minutes (0 for webhook-only)',
+                required: false,
+                default: 0
+            ]
+        ]
+    ]
+]
+    def cloudBeesFeatures = [
+        'CloudBees Pipeline Template Catalog': [
+            description: 'Integration with CloudBees CI pipeline template catalogs',
+            config: [
+                'catalogName': [
+                    description: 'Name of the template catalog',
+                    required: true
+                ],
+                'templateDirectory': [
+                    description: 'Directory containing templates',
+                    required: false,
+                    default: 'templates'
+                ],
+                'branchTemplate': [
+                    description: 'Template to use for branches',
+                    required: false
+                ],
+                'prTemplate': [
+                    description: 'Template to use for pull requests',
+                    required: false
+                ]
+            ]
+        ],
+        'CloudBees Folder Properties': [
+            description: 'CloudBees CI specific folder properties',
+            config: [
+                'applicationId': [
+                    description: 'CloudBees CI application identifier',
+                    required: false
+                ],
+                'templateName': [
+                    description: 'Default template name',
+                    required: false
+                ]
+            ]
+        ],
+        'CloudBees View Configuration': [
+            description: 'Configure custom views for the organization folder',
+            config: [
+                'primaryView': [
+                    description: 'Name of the primary view',
+                    required: false
+                ],
+                'statusFilter': [
+                    description: 'Filter repositories by status',
+                    required: false,
+                    values: ['ALL', 'ENABLED', 'DISABLED']
+                ]
+            ]
+        ],
+        'CloudBees Repository Rules': [
+            description: 'Define rules for repository scanning and behavior',
+            config: [
+                'repositoryPattern': [
+                    description: 'Pattern to match repository names',
+                    required: false,
+                    example: '.*-service|.*-api'
+                ],
+                'branchPattern': [
+                    description: 'Pattern to match branch names',
+                    required: false,
+                    example: 'main|develop|release/.*'
+                ],
+                'autoDisableRepos': [
+                    description: 'Automatically disable inactive repositories',
+                    required: false,
+                    default: false
+                ]
+            ]
+        ],
+        'CloudBees Bundle Configuration': [
+            description: 'Configure CloudBees CI bundle settings for the organization',
+            config: [
+                'bundleId': [
+                    description: 'ID of the CloudBees CI bundle to use',
+                    required: false
+                ],
+                'enforceBundle': [
+                    description: 'Enforce bundle configuration on all repositories',
+                    required: false,
+                    default: true
+                ]
+            ]
+        ],
+        'CloudBees Role-Based Access Control': [
+            description: 'Configure RBAC settings for the organization folder',
+            config: [
+                'roleMap': [
+                    description: 'Map of roles to groups/users',
+                    required: false,
+                    example: """
+roles:
+  administrator:
+    - 'bitbucket-admins'
+  developer:
+    - 'bitbucket-developers'
+  viewer:
+    - 'bitbucket-viewers'"""
+                ]
+            ]
+        ],
+        'CloudBees Pipeline Policies': [
+            description: 'Configure pipeline policies for the organization',
+            config: [
+                'policyBundles': [
+                    description: 'List of policy bundles to apply',
+                    required: false
+                ],
+                'enforcementLevel': [
+                    description: 'How strictly to enforce policies',
+                    required: false,
+                    values: ['WARN', 'ENFORCE'],
+                    default: 'ENFORCE'
+                ]
+            ]
+        ],
+        'CloudBees Metrics Collection': [
+            description: 'Configure metrics collection for the organization',
+            config: [
+                'collectMetrics': [
+                    description: 'Enable metrics collection',
+                    required: false,
+                    default: true
+                ],
+                'metricsScope': [
+                    description: 'Scope of metrics collection',
+                    required: false,
+                    values: ['ALL', 'BUILDS_ONLY', 'PERFORMANCE_ONLY']
+                ]
+            ]
+        ]
+    ]
+
+    // Generate the documentation
+    writeFile file: "${ANALYSIS_DIR}/bitbucket-config-options.md", text: generateBitbucketConfigDoc(traitConfigs, cloudBeesFeatures)
+}
+
+def generateBitbucketConfigDoc(traitConfigs, cloudBeesFeatures) {
+    return """# BitBucket Branch Source Plugin Configuration Guide
+
+## Core Configuration Options
+
+### Required Fields
+- credentialsId: Jenkins credential ID for BitBucket authentication
+- owner: BitBucket project key or team name
+
+### Optional Fields
+- serverUrl: BitBucket Server URL (not needed for BitBucket Cloud)
+- checkoutCredentialsId: Separate credentials for checkout (optional)
+- pattern: Project naming pattern (default: .*)
+- autoRegisterHooks: Boolean to auto-register webhooks (default: true)
+
+## Available Traits and Their Configuration
+
+${traitConfigs.collect { name, config -> """
+### ${name}
+- Source: ${config.plugin}
+${config.config.collect { param, details -> """
+#### ${param}
+- Description: ${details.description}
+${details.values ? "- Possible values:\n" + details.values.collect { k, v -> "  * `${k}`: ${v}" }.join('\n') : ''}
+- Required: ${details.required ? 'Yes' : 'No'}
+${details.example ? "- Example: `${details.example}`" : ''}
+"""}.join('\n')}
+"""}.join('\n')}
+
+## CloudBees CI Specific Features
+
+${cloudBeesFeatures.collect { name, feature -> """
+### ${name}
+${feature.description}
+
+Configuration Options:
+${feature.config.collect { param, details -> """
+- `${param}`:
+  * Description: ${details.description}
+  * Required: ${details.required ? 'Yes' : 'No'}
+  ${details.default ? "* Default: `${details.default}`" : ''}
+"""}.join('\n')}
+"""}.join('\n')}
+
+## Configuration Examples
+
+### Minimal Job XML (Required Fields Only)
+```xml
+${generateJobXML([])}
+```
+
+### Minimal CasC YAML (Required Fields Only)
+```yaml
+jenkins:
+  organizations:
+    - bitbucket:
+        credentialsId: 'bitbucket-creds'
+        owner: 'YOUR-ORG'
+        traits:
+          - branchDiscovery:
+              strategyId: 3
+```
+
+### Comprehensive CasC Example with CloudBees CI Features
+```yaml
+jenkins:
+  organizations:
+    - bitbucket:
+        credentialsId: 'bitbucket-creds'
+        owner: 'YOUR-ORG'
+        serverUrl: 'https://bitbucket.your-company.com'
+        traits:
+          - branchDiscovery:
+              strategyId: 3
+          - headWildcardFilter:
+              includes: 'main develop PR-* feature/* release/*'
+          - pullRequestDiscovery:
+              strategyId: 1
+          - webhookRegistration:
+              mode: ITEM
+          - gitLFSPull: {}
+          - submoduleOptions:
+              recursive: true
+              shallow: false
+              timeout: 15
+          - cloneOption:
+              shallow: true
+              depth: 3
+              noTags: false
+          - buildStrategy:
+              strategies:
+                - skipInitialBuild: {}
+                - tagBuild: {}
+          - authorRegistration:
+              authorMode: 'MEMBER_OF_ORGANIZATION'
+        properties:
+          - cloudBeesFolderProperties:
+              applicationId: 'your-app-id'
+              templateName: 'your-template'
+          - templateCatalogProperties:
+              catalogName: 'your-catalog'
+              templateDirectory: 'templates'
+          - cloudBeesViewConfiguration:
+              primaryView: 'All Repositories'
+              statusFilter: 'ENABLED'
+          - cloudBeesPipelinePolicies:
+              policyBundles:
+                - 'default-policies'
+              enforcementLevel: 'ENFORCE'
+```
+
+## Notes
+- Plugin versions are managed by the system and should not be specified in job configurations
+- Some traits may require additional plugins to be installed
+- CloudBees CI specific features require appropriate CloudBees CI plugins and licenses
+- Webhook configuration may require appropriate permissions in BitBucket
+"""
+}
+
+def generateJobXML(configOptions) {
+    return """<?xml version='1.0' encoding='UTF-8'?>
+<jenkins.branch.OrganizationFolder>
+  <properties>
+    <!-- Basic Properties -->
+    <com.cloudbees.hudson.plugins.folder.properties.EnvVarsFolderProperty> <!-- (optional) -->
+      <properties></properties>
+    </com.cloudbees.hudson.plugins.folder.properties.EnvVarsFolderProperty>
+    <jenkins.branch.OrganizationChildHealthMetricsProperty> <!-- (optional) -->
+      <templates>
+        <com.cloudbees.hudson.plugins.folder.health.WorstChildHealthMetric/>
+      </templates>
+    </jenkins.branch.OrganizationChildHealthMetricsProperty>
+    
+    <!-- CloudBees CI Properties (all optional) -->
+    <com.cloudbees.hudson.plugins.folder.properties.CloudBeesFolderProperties> <!-- (optional) -->
+      <applicationId>your-app-id</applicationId>
+    </com.cloudbees.hudson.plugins.folder.properties.CloudBeesFolderProperties>
+    
+    <com.cloudbees.pipeline.template.properties.TemplateCatalogFolderProperty> <!-- (optional) -->
+      <catalogName>your-catalog</catalogName> <!-- (required if property is used) -->
+      <templateDirectory>templates</templateDirectory> <!-- (optional, default: templates) -->
+      <branchTemplate>branch-template</branchTemplate> <!-- (optional) -->
+      <prTemplate>pr-template</prTemplate> <!-- (optional) -->
+    </com.cloudbees.pipeline.template.properties.TemplateCatalogFolderProperty>
+  </properties>
+
+  <navigators>
+    <com.cloudbees.jenkins.plugins.bitbucket.BitbucketSCMNavigator>
+      <!-- Required Core Configuration -->
+      <credentialsId>bitbucket-creds</credentialsId> <!-- (required) -->
+      <repoOwner>YOUR-ORG</repoOwner> <!-- (required) -->
+      
+      <!-- Optional Core Configuration -->
+      <serverUrl>https://bitbucket.org</serverUrl> <!-- (optional, default: https://bitbucket.org) -->
+      <checkoutCredentialsId>checkout-creds</checkoutCredentialsId> <!-- (optional) -->
+      <pattern>.*</pattern> <!-- (optional, default: .*) -->
+      <autoRegisterHooks>true</autoRegisterHooks> <!-- (optional, default: true) -->
+
+      <traits>
+        <!-- Branch Discovery (required trait with required configuration) -->
+        <com.cloudbees.jenkins.plugins.bitbucket.BranchDiscoveryTrait>
+          <strategyId>3</strategyId> <!-- (required) - 1: Exclude PRs, 2: Only PRs, 3: All -->
+        </com.cloudbees.jenkins.plugins.bitbucket.BranchDiscoveryTrait>
+
+        <!-- Pull Request Discovery (optional trait with required configuration if used) -->
+        <com.cloudbees.jenkins.plugins.bitbucket.PullRequestDiscoveryTrait>
+          <strategyId>1</strategyId> <!-- (required if trait used) - 1: Merge PR, 2: PR Head, 3: Both -->
+        </com.cloudbees.jenkins.plugins.bitbucket.PullRequestDiscoveryTrait>
+
+        <!-- Branch/PR Filter (optional) -->
+        <jenkins.scm.impl.trait.WildcardSCMHeadFilterTrait>
+          <includes>main develop PR-*</includes> <!-- (optional) -->
+          <excludes>feature/old/*</excludes> <!-- (optional) -->
+        </jenkins.scm.impl.trait.WildcardSCMHeadFilterTrait>
+
+        <!-- Webhook Configuration (optional) -->
+        <com.cloudbees.jenkins.plugins.bitbucket.WebhookRegistrationTrait>
+          <mode>ITEM</mode> <!-- (optional, default: SYSTEM) -->
+        </com.cloudbees.jenkins.plugins.bitbucket.WebhookRegistrationTrait>
+
+        <!-- Git Configuration Traits (all optional) -->
+        <jenkins.plugins.git.traits.CleanBeforeCheckoutTrait/> <!-- (optional) -->
+        <jenkins.plugins.git.traits.CleanAfterCheckoutTrait/> <!-- (optional) -->
+        
+        <jenkins.plugins.git.traits.GitLFSPullTrait> <!-- (optional) -->
+          <enabled>true</enabled> <!-- (optional, default: false) -->
+        </jenkins.plugins.git.traits.GitLFSPullTrait>
+
+        <jenkins.plugins.git.traits.SubmoduleOptionTrait> <!-- (optional) -->
+          <extension>
+            <recursive>true</recursive> <!-- (optional, default: false) -->
+            <shallow>false</shallow> <!-- (optional, default: false) -->
+            <timeout>10</timeout> <!-- (optional, default: 10) -->
+          </extension>
+        </jenkins.plugins.git.traits.SubmoduleOptionTrait>
+
+        <!-- Build Strategy Configuration (optional) -->
+        <jenkins.branch.buildstrategies.basic.BranchBuildStrategyImpl> <!-- (optional) -->
+          <strategies>
+            <jenkins.branch.buildstrategies.basic.SkipInitialBuildOnFirstBranchIndexing/> <!-- (optional) -->
+            <jenkins.branch.buildstrategies.basic.TagBuildStrategyImpl/> <!-- (optional) -->
+          </strategies>
+        </jenkins.branch.buildstrategies.basic.BranchBuildStrategyImpl>
+
+        <!-- Clone Options (optional) -->
+        <jenkins.plugins.git.traits.CloneOptionTrait> <!-- (optional) -->
+          <extension>
+            <shallow>true</shallow> <!-- (optional, default: false) -->
+            <noTags>false</noTags> <!-- (optional, default: false) -->
+            <reference></reference> <!-- (optional) -->
+            <timeout>10</timeout> <!-- (optional, default: 10) -->
+            <depth>1</depth> <!-- (optional, default: 1) -->
+            <honorRefspec>false</honorRefspec> <!-- (optional, default: false) -->
+          </extension>
+        </jenkins.plugins.git.traits.CloneOptionTrait>
+
+        <!-- Author Registration (optional) -->
+        <com.cloudbees.jenkins.plugins.bitbucket.AuthorRegistrationTrait>
+          <authorMode>EVERYONE</authorMode> <!-- (optional, default: EVERYONE) -->
+        </com.cloudbees.jenkins.plugins.bitbucket.AuthorRegistrationTrait>
+
+        <!-- SCM Trigger (optional) -->
+        <jenkins.plugins.git.traits.SCMTriggerTrait>
+          <interval>0</interval> <!-- (optional, default: 0) -->
+        </jenkins.plugins.git.traits.SCMTriggerTrait>
+      </traits>
+    </com.cloudbees.jenkins.plugins.bitbucket.BitbucketSCMNavigator>
+  </navigators>
+</jenkins.branch.OrganizationFolder>"""
+}
+
+def generateCasCConfig(configOptions) {
+    return """jenkins:
+  organizations:
+    - bitbucket:
+        credentialsId: 'bitbucket-creds'
+        owner: 'YOUR-ORG'
+        serverUrl: 'https://bitbucket.org'  # Optional, defaults to BitBucket Cloud
+        traits:
+          - branchDiscovery:
+              strategyId: 3  # Discover all branches
+          - headWildcardFilter:
+              includes: 'main develop PR-*'
+          - cleanBeforeCheckout: {}
+          - cleanAfterCheckout: {}
+        properties:
+          - cloudBeesFolderProperties:
+              applicationId: 'your-app-id'"""
+}
+
+def generateFinalReport() {
+    def report = new StringBuilder()
+    report.append("# Plugin Analysis Report\n\n")
+    
+    def versionInfo = readJSON file: "${ANALYSIS_DIR}/version-info.json"
+    report.append("## Version Information\n")
+    report.append("* Plugin Version: ${versionInfo.version}\n")
+    report.append("* Required Jenkins: ${versionInfo.jenkinsVersion}\n")
+    report.append("* Java Level: ${versionInfo.javaLevel}\n\n")
+    
+    def deps = readJSON file: "${ANALYSIS_DIR}/dependencies.json"
+    report.append("## Dependencies\n")
+    report.append(formatDependencies(deps))
+    
+    def docAnalysis = readFile "${ANALYSIS_DIR}/documentation-analysis.md"
+    report.append("\n## Documentation\n")
+    report.append(docAnalysis)
+    
+    writeFile file: "${ANALYSIS_DIR}/final-report.md", text: report.toString()
+}
