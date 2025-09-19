@@ -1,0 +1,140 @@
+pipeline {
+    agent {
+        label "${params.AGENT_LABEL}"
+    }
+
+    parameters {
+        string(name: 'AGENT_LABEL', defaultValue: 'cb-migration', description: 'Agent label to run this job')
+        string(name: 'CB_HOME', defaultValue: '/var/lib/cloudbees-core-cm', description: 'JENKINS_HOME on source and target controllers')
+        string(name: 'MULTI_TARGETS', description: 'Comma-separated controller:IP pairs (e.g. controller-1:10.0.0.1,controller-2:10.0.0.2)')
+        string(name: 'SSH_CREDENTIAL_ID', description: 'SSH credential ID')
+        string(name: 'OUTPUT_DIR', defaultValue: '', description: 'Optional output directory for folders.txt')
+        booleanParam(name: 'EXCLUDE_RBAC', defaultValue: false, description: 'Exclude nectar-rbac.xml from sync')
+        booleanParam(name: 'DRY_RUN', defaultValue: true, description: 'If true, only generate folders.txt; skip rsync')
+        booleanParam(name: 'CLEAN_WORKSPACE', defaultValue: false, description: 'Clean workspace before running')
+    }
+
+    environment {
+        FOLDERS_FILE_NAME = 'folders.txt'
+    }
+
+    stages {
+
+        stage('Clean Workspace') {
+            when {
+                expression { params.CLEAN_WORKSPACE }
+            }
+            steps {
+                cleanWs()
+                echo "Workspace cleaned"
+            }
+        }
+
+        stage('Generate folders.txt') {
+            steps {
+                script {
+                    def outputPath = params.OUTPUT_DIR?.trim() 
+                        ? "${params.OUTPUT_DIR}/${env.FOLDERS_FILE_NAME}" 
+                        : env.FOLDERS_FILE_NAME
+
+                    def folderList = generateFolderList([outputPath: outputPath])
+                    echo "Generated ${folderList.size()} folders. Saved to ${outputPath}"
+                    folderList.take(5).each { echo "  - ${it}" }
+
+                    echo "==== folders.txt Contents ===="
+                    def foldersText = readFile(outputPath)
+                    echo foldersText
+                    echo "=============================="
+
+                    if (!params.DRY_RUN) {
+                        env.GENERATED_FOLDERS = folderList.join('|||')
+                    }
+                }
+            }
+        }
+
+        stage('Distribute Folder Metadata') {
+            when {
+                expression { return !params.DRY_RUN }
+            }
+            steps {
+                withCredentials([sshUserPrivateKey(
+                    credentialsId: params.SSH_CREDENTIAL_ID,
+                    keyFileVariable: 'SSH_KEY',
+                    usernameVariable: 'SSH_USER'
+                )]) {
+                    script {
+                        def folders = env.GENERATED_FOLDERS.split('\\|\\|\\|')
+                        def targets = params.MULTI_TARGETS.split(',').collectEntries {
+                            def (name, ip) = it.trim().split(':')
+                            [(name): ip]
+                        }
+
+                        def sourceController = targets.keySet().toList().get(0)
+                        def sourceHost = targets[sourceController]
+
+                        def resolvePath = { path ->
+                            def base = "${params.CB_HOME}/jobs"
+                            def parts = path.tokenize('/')
+                            parts.inject(base) { acc, part -> "${acc}/jobs/${part}" }.replaceFirst('/jobs/jobs', '/jobs')
+                        }
+
+                        folders.each { folder ->
+                            def diskPath = resolvePath(folder.trim())
+
+                            // Always sync config.xml
+                            targets.each { controllerName, targetIp ->
+                                def targetFolder = "${params.CB_HOME}/jobs/${folder}"
+                                def sourceFile = "${diskPath}/config.xml"
+                                def destFile = "${targetFolder}/config.xml"
+
+                                def cmd = "rsync -az -e 'ssh -o StrictHostKeyChecking=no -i ${SSH_KEY}' ${SSH_USER}@${sourceHost}:${sourceFile} ${SSH_USER}@${targetIp}:${destFile}"
+                                echo "[SIMULATED] Would run: ${cmd}"
+                                // Uncomment to enable:
+                                // sh cmd
+                            }
+
+                            // Optionally sync nectar-rbac.xml if not excluded — no file check required
+                            if (!params.EXCLUDE_RBAC) {
+                                targets.each { controllerName, targetIp ->
+                                    def targetFolder = "${params.CB_HOME}/jobs/${folder}"
+                                    def sourceFile = "${diskPath}/nectar-rbac.xml"
+                                    def destFile = "${targetFolder}/nectar-rbac.xml"
+
+                                    def cmd = "rsync -az -e 'ssh -o StrictHostKeyChecking=no -i ${SSH_KEY}' ${SSH_USER}@${sourceHost}:${sourceFile} ${SSH_USER}@${targetIp}:${destFile}"
+                                    echo "[SIMULATED] Would run: ${cmd}"
+                                    // Uncomment to enable:
+                                    // sh cmd
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        stage('Summary') {
+            steps {
+                script {
+                    def path = params.OUTPUT_DIR?.trim() ? "${params.OUTPUT_DIR}/${env.FOLDERS_FILE_NAME}" : env.FOLDERS_FILE_NAME
+                    echo "========== Summary =========="
+                    echo "Folder list: ${path}"
+                    echo "DRY_RUN: ${params.DRY_RUN}"
+                    echo "RBAC excluded: ${params.EXCLUDE_RBAC}"
+                    echo "Controllers: ${params.MULTI_TARGETS}"
+                    echo "Agent: ${params.AGENT_LABEL}"
+                    echo "============================="
+                }
+            }
+        }
+    }
+
+    post {
+        success {
+            echo "[SUCCESS] Folder prepopulation completed cleanly."
+        }
+        failure {
+            echo "[FAILURE] Folder prepopulation encountered errors."
+        }
+    }
+}
