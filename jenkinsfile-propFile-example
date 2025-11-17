@@ -1,0 +1,112 @@
+pipeline {
+    agent any
+    
+    stages {
+        stage('Load Pipeline Configuration') {
+            steps {
+                script {
+                    // Define default values for all stage controls
+                    def defaults = [
+                        'stage.build.enabled': 'true',
+                        'stage.unit.tests.enabled': 'true',
+                        'stage.integration.tests.enabled': 'true',
+                        'stage.security.scan.enabled': 'true',
+                        'stage.deploy.dev.enabled': 'true',
+                        'stage.deploy.preprod.enabled': 'true',
+                        'stage.deploy.prod.enabled': 'false'
+                    ]
+                    
+                    // Read properties file with defaults
+                    env.PIPELINE_CONFIG = readProperties(defaults: defaults, file: 'pipeline.properties')
+                    
+                    // Make individual properties available as environment variables
+                    env.BUILD_ENABLED = env.PIPELINE_CONFIG['stage.build.enabled']
+                    env.UNIT_TESTS_ENABLED = env.PIPELINE_CONFIG['stage.unit.tests.enabled']
+                    env.INTEGRATION_TESTS_ENABLED = env.PIPELINE_CONFIG['stage.integration.tests.enabled']
+                    env.SECURITY_SCAN_ENABLED = env.PIPELINE_CONFIG['stage.security.scan.enabled']
+                    env.DEPLOY_DEV_ENABLED = env.PIPELINE_CONFIG['stage.deploy.dev.enabled']
+                    env.DEPLOY_PREPROD_ENABLED = env.PIPELINE_CONFIG['stage.deploy.preprod.enabled']
+                    env.DEPLOY_PROD_ENABLED = env.PIPELINE_CONFIG['stage.deploy.prod.enabled']
+                    
+                    echo "Pipeline Configuration Loaded:"
+                    echo "  Build: ${env.BUILD_ENABLED}"
+                    echo "  Unit Tests: ${env.UNIT_TESTS_ENABLED}"
+                    echo "  Integration Tests: ${env.INTEGRATION_TESTS_ENABLED}"
+                    echo "  Security Scan: ${env.SECURITY_SCAN_ENABLED}"
+                    echo "  Deploy to Dev: ${env.DEPLOY_DEV_ENABLED}"
+                    echo "  Deploy to Preprod: ${env.DEPLOY_PREPROD_ENABLED}"
+                    echo "  Deploy to Prod: ${env.DEPLOY_PROD_ENABLED}"
+                }
+            }
+        }
+        
+        stage('Build') {
+            when {
+                expression { env.BUILD_ENABLED == 'true' }
+            }
+            steps {
+                echo "I built the application"
+            }
+        }
+        
+        stage('Unit Tests') {
+            when {
+                expression { env.UNIT_TESTS_ENABLED == 'true' }
+            }
+            steps {
+                echo "I ran unit tests"
+            }
+        }
+        
+        stage('Integration Tests') {
+            when {
+                expression { env.INTEGRATION_TESTS_ENABLED == 'true' }
+            }
+            steps {
+                echo "I ran integration tests"
+            }
+        }
+        
+        stage('Security Scan') {
+            when {
+                expression { env.SECURITY_SCAN_ENABLED == 'true' }
+            }
+            steps {
+                echo "I ran security scanning"
+            }
+        }
+        
+        stage('Deploy to Dev') {
+            when {
+                expression { env.DEPLOY_DEV_ENABLED == 'true' }
+            }
+            steps {
+                echo "I deployed to Dev environment"
+            }
+        }
+        
+        stage('Deploy to Preprod') {
+            when {
+                expression { env.DEPLOY_PREPROD_ENABLED == 'true' }
+            }
+            steps {
+                echo "I deployed to Preprod environment"
+            }
+        }
+        
+        stage('Deploy to Production') {
+            when {
+                expression { env.DEPLOY_PROD_ENABLED == 'true' }
+            }
+            steps {
+                echo "I deployed to Production environment"
+            }
+        }
+    }
+    
+    post {
+        always {
+            echo "Pipeline execution completed"
+        }
+    }
+}
