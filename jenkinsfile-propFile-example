@@ -29,43 +29,6 @@ pipeline {
     agent any
     
     stages {
-        stage('Load Pipeline Configuration') {
-            steps {
-                script {
-                    // Define default values for all stage controls
-                    def defaults = [
-                        'stage.build.enabled': 'true',
-                        'stage.unit.tests.enabled': 'true',
-                        'stage.integration.tests.enabled': 'true',
-                        'stage.security.scan.enabled': 'true',
-                        'stage.deploy.dev.enabled': 'true',
-                        'stage.deploy.preprod.enabled': 'true',
-                        'stage.deploy.prod.enabled': 'false'
-                    ]
-                    
-                    // Read properties file with defaults
-                    def props = readProperties(defaults: defaults, file: 'pipeline.properties')
-                    
-                    // Make individual properties available as environment variables
-                    env.BUILD_ENABLED = props.getProperty('stage.build.enabled')
-                    env.UNIT_TESTS_ENABLED = props.getProperty('stage.unit.tests.enabled')
-                    env.INTEGRATION_TESTS_ENABLED = props.getProperty('stage.integration.tests.enabled')
-                    env.SECURITY_SCAN_ENABLED = props.getProperty('stage.security.scan.enabled')
-                    env.DEPLOY_DEV_ENABLED = props.getProperty('stage.deploy.dev.enabled')
-                    env.DEPLOY_PREPROD_ENABLED = props.getProperty('stage.deploy.preprod.enabled')
-                    env.DEPLOY_PROD_ENABLED = props.getProperty('stage.deploy.prod.enabled')
-                    
-                    echo "Pipeline Configuration Loaded:"
-                    echo "  Build: ${env.BUILD_ENABLED}"
-                    echo "  Unit Tests: ${env.UNIT_TESTS_ENABLED}"
-                    echo "  Integration Tests: ${env.INTEGRATION_TESTS_ENABLED}"
-                    echo "  Security Scan: ${env.SECURITY_SCAN_ENABLED}"
-                    echo "  Deploy to Dev: ${env.DEPLOY_DEV_ENABLED}"
-                    echo "  Deploy to Preprod: ${env.DEPLOY_PREPROD_ENABLED}"
-                    echo "  Deploy to Prod: ${env.DEPLOY_PROD_ENABLED}"
-                }
-            }
-        }
         
         stage('Build') {
             when {
