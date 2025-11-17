@@ -17,16 +17,16 @@ pipeline {
                     ]
                     
                     // Read properties file with defaults
-                    env.PIPELINE_CONFIG = readProperties(defaults: defaults, file: 'pipeline.properties')
+                    def props = readProperties(defaults: defaults, file: 'pipeline.properties')
                     
                     // Make individual properties available as environment variables
-                    env.BUILD_ENABLED = env.PIPELINE_CONFIG['stage.build.enabled']
-                    env.UNIT_TESTS_ENABLED = env.PIPELINE_CONFIG['stage.unit.tests.enabled']
-                    env.INTEGRATION_TESTS_ENABLED = env.PIPELINE_CONFIG['stage.integration.tests.enabled']
-                    env.SECURITY_SCAN_ENABLED = env.PIPELINE_CONFIG['stage.security.scan.enabled']
-                    env.DEPLOY_DEV_ENABLED = env.PIPELINE_CONFIG['stage.deploy.dev.enabled']
-                    env.DEPLOY_PREPROD_ENABLED = env.PIPELINE_CONFIG['stage.deploy.preprod.enabled']
-                    env.DEPLOY_PROD_ENABLED = env.PIPELINE_CONFIG['stage.deploy.prod.enabled']
+                    env.BUILD_ENABLED = props.getProperty('stage.build.enabled')
+                    env.UNIT_TESTS_ENABLED = props.getProperty('stage.unit.tests.enabled')
+                    env.INTEGRATION_TESTS_ENABLED = props.getProperty('stage.integration.tests.enabled')
+                    env.SECURITY_SCAN_ENABLED = props.getProperty('stage.security.scan.enabled')
+                    env.DEPLOY_DEV_ENABLED = props.getProperty('stage.deploy.dev.enabled')
+                    env.DEPLOY_PREPROD_ENABLED = props.getProperty('stage.deploy.preprod.enabled')
+                    env.DEPLOY_PROD_ENABLED = props.getProperty('stage.deploy.prod.enabled')
                     
                     echo "Pipeline Configuration Loaded:"
                     echo "  Build: ${env.BUILD_ENABLED}"
